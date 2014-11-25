@@ -1,0 +1,464 @@
+---
+title: "Quantitative phospho-proteomics study of 
+tumour-endothelial contact-initiated signalling: obtention of the \"core\" list of regulated phosphosites"
+author: "M. Locard-Paulet"
+date: "15 September 2014"
+output: html_document
+---
+
+```{r Packages, echo=FALSE}
+library("ggplot2")
+```
+
+```{r Functions, echo=FALSE}
+FilledTable <- function(List, data.frame){
+        mat <- matrix("", nrow=length(List), ncol=max(sapply(List, length)))
+        for(x in 1:length(List))
+                if(length(List[[x]]))
+                       {mat[x,1:length(List[[x]])] <- List[[x]]}
+        cbind(data.frame, mat)
+}
+replace.vector <-function(x, tochange=unique(x), toreplace=1:length(unique(x))){
+        for (y in 1:length(tochange))  x=replace(x, list=(x==tochange[y]), toreplace[y])
+	x
+}
+
+```
+
+## Raw data
+
+The initial table utilised as raw data for this analysis is `SILAC1018TotV5_FAAposition.csv`.
+It contains all the unmodified fields from the PD1.3$~/~$Mascot searches performed independently on all the raw files.
+The only filter applied were set-up before the search and quantification: **Mascot significance threshold < 0.05**.
+Some columns have been added:
+
+- `log2HM` is the $log2$ transformation of the raw quantification `HeavyMedium` (ratio $heavy~signal~/~medium~signal$: $H/M$).  
+- `normalisedratioHM` is the `log2HM` normalised with the `NormalisationFactor`. The latest is the median of all $heavy~/~medium$ ratio from the same sample before $TiO_2$ phospho-enrichment. This step allows us to normalise for biased mix $heavy~/~medium$ (can be introduced by errors in cell counting) in MDA-labeled samples.  
+- `UniqueID` is a unique key per row of the table.  
+- `FirstAminoAcidPosition` is the position of the first aminoacid of the peptide sequence in the protein. It has been retrieved by matching the `Sequence` field to the entire protein sequence in the database used for the search. If the peptide can be identified in several protein sequences, the corresponding `ProteinGroupAccessions`, `ProteinDescriptions` and `FirstAminoAcidPosition` are separated by ";".
+
+```{r Description1, echo=FALSE}
+sample <- read.csv("Samples.csv")
+tab <- read.csv("SILAC1018TotV5_FAAposition.csv")
+tab <- tab[,c(1:ncol(tab)-1)] # remove the last column that contains only "NA".
+lUPSM <- length(unique(tab$Sequence))
+lUPSMp <- length(unique(tab$Sequence[grepl("Phospho", tab$Modifications)]))
+PenrTot <- lUPSMp / lUPSM * 100
+```
+
+**A total of `r lUPSM` unique peptide sequences are identified. Among them, `r PenrTot`% are phosphorylated.  **
+
+##Outline of the analysis:  
+
+1. Tidying the dataset by adding experimental informations (from the `Samples.csv` table).
+2. Determining the position of the phosphosite in the protein from the corresponding phospho-peptides.
+3. 1st round of statistics in order to identify proteins of interest (with regulated phosphosites) in the MDA-MB-231 and HUVEC from the raw dataset (this is an informational step not mentioned in the paper).
+4. Manual check of the spectra corresponding to the proteins identified in the first round of statistical analysis in order to remove outliers (poor quality either of the MS$_2$ spectrum, the quantification XIC or both).
+5. 2nd round of statistics in order to get a high confidence list of statistically regulated phosphosites (performed only on manually inspected high quality spectra).
+
+## Initial filtering / tidying of the dataset
+
+The following filters are applied to the whole table:
+
+- `qValue` $≤$ 0.01 in order to have a false discovery rate of less than 1% per peptide (according to Percolator).
+- Only the rows with an existing `pRSSiteProbabilities` value are kept, in order to be able to determine the best phosphosite position in the peptide (according to PhosphoRS).
+
+```{r DataTidying, dependson="Description1"}
+m <- match(tab$SpectrumFile,sample$SpectrumFile)
+df1 <- data.frame(tab, "Experiment"=sample$Experiment[m], "SampleName"=sample$SampleName[m], "Fraction"=sample$Fraction[m], "Cell"=sample$LabelledCell[m])
+tab <- df1
+tab <- tab[tab$qValue<=.01,]
+tab <- tab[!is.na(tab$pRSSiteProbabilities),]
+tab <- tab[tab$pRSSiteProbabilities!="",]
+val1 <- length(unique(tab$Sequence))/length(unique(df1$Sequence))*100
+Ambiguous <- tab[grepl(";", tab$ProteinGroupAccessions),]
+UAmbSeq <- length(unique(Ambiguous$Sequence))
+# write.csv(Ambiguous, "Ambiguous.csv", row.names=F) # if you want to have a check at the ambiguous peptides (not attributable to a unique protein)
+tab$ProteinGroupAccessions <- as.character(tab$ProteinGroupAccessions)
+tab$ProteinGroupAccessions[(grepl("CLIP1_HUMAN", as.character(tab$ProteinDescriptions)))&(grepl("CLIP2_HUMAN", as.character(tab$ProteinDescriptions)))] <- "P30622"
+tab$ProteinGroupAccessions[(grepl("TMCC2_HUMAN", as.character(tab$ProteinDescriptions)))&(grepl("TMCC3_HUMAN", as.character(tab$ProteinDescriptions)))] <- "O75069"
+tab$FirstAminoAcidPosition <- as.character(tab$FirstAminoAcidPosition)
+tab$FirstAminoAcidPosition[(grepl("CLIP1_HUMAN", as.character(tab$ProteinDescriptions)))&(grepl("CLIP2_HUMAN", as.character(tab$ProteinDescriptions)))] <- "346"
+tab$FirstAminoAcidPosition[(grepl("TMCC2_HUMAN", as.character(tab$ProteinDescriptions)))&(grepl("TMCC3_HUMAN", as.character(tab$ProteinDescriptions)))] <- "436"
+# Manual assessment of the "Ambiguous" table draw our attention of these two phosphopeptides. There log2(H/M) values may indicate phosphoregulation. Thus, I label them differently before I remove the ambiguous peptides from the analysis. These ones will be kept. This way, the localisation of the phosphosite will be based only on CLIP1 and TMCC2 sequences, respectively.
+tab <- tab[!grepl(";", tab$ProteinGroupAccessions),]
+```
+
+Applying these two filters reduces the table to `r val1`% of the number of starting unique sequences. Among them, `r UAmbSeq` are ambiguous sequences (can belong to several different proteins). They are Kept aside in the `Ambiguous.csv` table to be manually inspected. 
+
+## Phosphosite identities
+
+In order to perform the analysis on phosphosites and not phospho-peptides, the position of the phosphorylation at the protein level is retrieved based on the `pRSSiteProbabilities` value. For each spectrum, a new `ID` field is created with the protein Uniprot entry name followed by the phosphorylation position. If one peptide contains several distinct phosphorylations, the `ID` field is composed of the uniprot entry name of the protein followed by the several phospho-positions observed. 
+
+```{r pPos, warning=FALSE, dependson="DataTidying", dependson="Functions"}
+prob <- as.character(tab$pRSSiteProbabilities)
+P <- NULL
+fp <- as.character(tab$FirstAminoAcidPosition)
+for (i in 1:length(prob)){
+  x <- strsplit(prob[i], split='; ', fix=T)[[1]]
+  mat <- matrix(0, ncol=3,nrow=length(x))
+  for (j in 1:length(x)){
+    y <- strsplit(x[j], split=':', fix=T)[[1]]
+    mat[j,3] <- y[2]
+    y <- strsplit(y[1], split='(', fix=T)[[1]]
+    y[2] <- strsplit(y[2], split=')', fix=T)[[1]][1]
+    mat[j, 1:2] <- y
+    mat[j,2] <- as.numeric(mat[j,2])+as.numeric(fp[i])-1
+  }
+  mat <- mat[as.numeric(mat[,3])>=60,,drop=F]
+  mat <- mat[sort.list(as.numeric(mat[,3]),decreasing=T), ]
+  mat <- as.vector(t(mat))
+  P <- c(P, list(mat))
+}
+Uniprot <- as.character(tab$ProteinDescriptions)
+Uniprot <- sapply(Uniprot, function(x) strsplit(x, split='[', fixed=T)[[1]][2])
+Uniprot <- sapply(Uniprot, function(x) strsplit(x, split='_', fixed=T)[[1]][1])
+names(Uniprot) <- NULL
+Uniprot[grepl("CLIP2", tab$ProteinDescriptions)] <- "CLIP1/2"
+Uniprot[(grepl("TMCC2", tab$ProteinDescriptions))&(grepl("TMCC3", tab$ProteinDescriptions))] <- "TMCC2/3"
+# This way, the ambiguous proteins are considered as one. 
+tab <- FilledTable(P, data.frame(tab, nSite=sapply(P,function(x) length(x)/3), Uniprot=Uniprot))
+tab <- tab[(tab$nSite!=0), ] # Removes the peptides with ambiguous phosphosite position (pRS probability <= 60%).
+ID <- vector(length=nrow(tab))
+tab$Uniprot <- as.character(tab$Uniprot)
+tab$"1" <- as.character(tab$"1")
+tab$"2" <- as.numeric(as.character(tab$"2"))
+tab$"4" <- as.character(tab$"4")
+tab$"5" <- as.numeric(as.character(tab$"5"))
+tab$"7" <- as.character(tab$"7")
+tab$"8" <- as.numeric(as.character(tab$"8"))
+for (i in 1:nrow(tab)){
+   if (tab$nSite[i]%in%2) {ID[i] <- c(paste0(tab$Uniprot[i],'-',tab$"1"[i],tab$"2"[i],'-',tab$"4"[i],tab$"5"[i]))}
+   if (tab$nSite[i]%in%3) {ID[i] <- c(paste0(tab$Uniprot[i],'-',tab$"1"[i],tab$"2"[i],'-',tab$"4"[i],tab$"5"[i],'-',tab$"7"[i],tab$"8"[i]))}
+     else {ID[i] <- c(paste0(tab$Uniprot[i],'-',tab$"1"[i],tab$"2"[i]))}
+   }
+tab <- data.frame(tab, ID=ID, stringsAsFactors = FALSE)
+```
+
+```{r numbers1, echo=FALSE, dependson="pPos"}
+lUPSM <- length(unique(tab$Sequence))
+lUID <- length(unique(tab$ID))
+lUprot <- length(unique(tab$ProteinGroupAccessions))
+lUIDq <- length(unique(tab$ID[!is.na(tab$log2HM)])) / length(unique(tab$ID)) * 100 
+lUIDMDA <- length(unique(tab$ID[tab$Cell=="MDA-MB-231"]))
+lUIDHUV <- length(unique(tab$ID[tab$Cell=="HUVEC"]))
+lIntersect <- length(unique(intersect(tab$ID[tab$Cell=="MDA-MB-231"], tab$ID[tab$Cell=="HUVEC"])))
+```
+
+**There are `r lUPSM` unique phospho-peptides in the dataset. They correspond to `r lUID` unique phosphosites identified (`r lUIDMDA` in the MDA-MB-231, `r lUIDHUV` in the HUVEC and `r lIntersect` identified in the two cell types). They correspond to `r lUprot` unique proteins. Among theses phosphosites, `r lUIDq`% have a $log2(H/M)$ value (meaning that they have a quantification value). **  
+*Note: Although the `ID` field is generally unique to one phosphosite, a given phosphosite can be identified by several ID if it is seen in mono-phosphorylated peptides and with several phosphorylations on the same peptide.*
+
+## Regulated phosphosites in the breast cancer cells
+
+### Description
+
+Phosphosites quantified in the MDA-MB-231 are extracted from the master table.
+
+```{r MDAnumbers, dependson="numbers1"}
+tMDA <- tab[tab$Cell=="MDA-MB-231",]
+tHUV <- tab[tab$Cell=="HUVEC",] # For later, when I will work on the HUVEC
+lMDAt <- nrow(tMDA)
+lUIDMDA <- length(unique(tMDA$ID))
+lUIDMDAq <- length(unique(tMDA$ID[!is.na(tMDA$log2HM)])) / length(unique(tMDA$ID)) * 100
+lUIDMDAm <- length(unique(tMDA$ID[tMDA$Fraction=="membrane"]))
+lUIDMDAc <- length(unique(tMDA$ID[tMDA$Fraction=="cytoplasm"]))
+lUIDMDAmc <- length(intersect(unique(tMDA$ID[tMDA$Fraction=="membrane"]), unique(tMDA$ID[tMDA$Fraction=="cytoplasm"])))
+lUIDMDAmq <- length(unique(tMDA$ID[(tMDA$Fraction=="membrane") & (!is.na(tMDA$log2HM))]))
+lUIDMDAcq <- length(unique(tMDA$ID[(tMDA$Fraction=="cytoplasm") & (!is.na(tMDA$log2HM))]))
+lUIDMDAmcq <- length(intersect(unique(tMDA$ID[(tMDA$Fraction=="membrane") & (!is.na(tMDA$log2HM))]), unique(tMDA$ID[(tMDA$Fraction=="cytoplasm") & (!is.na(tMDA$log2HM))])))
+```
+
+There are `r lMDAt` identified phospho-peptides in the MDA-MB-231. They correspond to `r lUIDMDA` unique ID, among which `r lUIDMDAq`% are quantified. `r lUIDMDAc` come from cytoplasmic fractions (`r lUIDMDAcq` quantified), `r lUIDMDAm` from membrane-enriched fractions (`r lUIDMDAmq` quantified), and `r lUIDMDAmc` are common in both (`r lUIDMDAmcq` quantified).
+
+### Statistical analysis
+
+Because of a discrepancy between Mascot and phosphoRS phospho-position attribution (see columns `Modifications` and `pRSSiteProbabilities`), we kept until now several rows with different phospho-positions for the same spectrum/phosphosite/quantification value. The first step of the analysis is to keep only the best phospho-position per quantification value per sample. We decided to keep the peptide spectral match with the best pRS probability on the first phosphosite (if multiple phosphorylations on the same peptide).  
+A table is created with only the data from the MDA-MB-231, and only one quantification value per phosphosite per sample. A two-sided t-test is performed on this refined table in order to identify phosphosites with a $log2(H/M)$ ratio that is significantly different from the others ($\alpha$=0.05). Results are further filtered in order to keep only the phosphosites quantified in more than two independent experiments and with a mean of $log2$-transformed fold change of at least 0.5.
+
+```{r MDApsites, dependson="MDAnumbers", dependson="Functions", cache.lazy=FALSE}
+tab <- tMDA
+tab <- tab[!is.na(tab$log2HM),]
+IDQuan <- paste0(tab$QuanResultID,"-",tab$SpectrumFile) # creates a unique quantification ID per phosphosite. 
+tab <- data.frame(tab,IDQuan=IDQuan,stringsAsFactors=F)
+
+QID <- lapply(unique(tab$IDQuan), function(y) tab[tab$IDQuan==y, 'X3']) 
+names(QID) <- unique(tab$IDQuan) # list with the pRS probability of the first phosphosite for each QuanResultID
+SID <- lapply(unique(tab$IDQuan), function(y) tab[tab$IDQuan==y, 'SpectrumFile']) 
+names(SID) <- unique(tab$IDQuan) # list with the sample files for each QuanResultID
+UID <- lapply(unique(tab$IDQuan), function(y) tab[tab$IDQuan==y, 'UniqueID']) 
+names(UID) <- unique(tab$IDQuan) # list with the unique row ID for each QuanResultID
+
+
+MaxpRS <- lapply(1:length(QID), function(x) aggregate(as.numeric(as.character(QID[[x]])), list(as.character(SID[[x]])), max)[,2]) 
+names(MaxpRS) <- unique(tab$IDQuan) # determines which quantification result corresponds to the highest pRS probability for a phosphosite in a given sample.
+
+v <- c(rep(0,length(MaxpRS)))
+for (i in 1:length(MaxpRS)) {
+  for (j in 1:length(UID[[i]])) {
+    if (MaxpRS[[i]]==as.numeric(as.character(QID[[i]][j]))) {
+      v[i] <- as.character(UID[[i]][j])
+    }
+  }
+}
+
+tab1 <- tab[tab$UniqueID%in%v,] ## This table contain one quan per peptide + the peptide of this quanvalue with the max pRS
+
+#### Then, I perform a t-test on the phosphosites 
+
+dat <- lapply(unique(tab1$ID), function(y) tab1[tab1$ID==y, 'normalisedratioHM'])
+dat2 <- lapply(unique(tab1$ID), function(y) tab1[tab1$ID==y, 'Experiment'])
+names(dat) <- unique(tab1$ID)
+
+dat <- lapply(1:length(dat), function(x) aggregate(dat[[x]], list(dat2[[x]]), median)[,2]) # Keep the median of log2(H/M) per biological replicate in order to perform the t-test.
+names(dat) <- unique(tab1$ID)
+
+s <- lapply(dat, length)
+dat <- dat[s>=2] # Select only the phosphosites quantified in at least two independent experiments.
+p5 <- sapply(1:length(dat), function(y) t.test(dat[[y]], alternative='two.sided')$p.value)
+fc <- sapply(1:length(dat), function(y) mean(dat[[y]]))
+Uniprot <- tab1$Uniprot[match(names(dat), tab1$ID)]
+tabp <- FilledTable(dat, data.frame(ID=names(dat), Uniprot=Uniprot, t.2sided=p5, FC=fc)) # Table with for each ID the pvalue of the two-sided t-test, the fold change and the log2(H/M) (median per experiment).
+v1 <- tabp$FC[match(tab1$ID, tabp$ID)]
+v2 <- tabp$t.2sided[match(tab1$ID, tabp$ID)]
+tab3 <- data.frame(tab1, "FC"=v1, "t.2sided"=v2, stringsAsFactors=F)
+# write.csv(tab3, "MDAttest.csv", row.names=F) # saved for enrichment analysis
+
+# List of significant p.value (t.test) + FC above 0.5 or under -0.5:
+
+MDAIDp <- as.character(unique(tabp$ID[tabp$t.2sided<=0.05]))
+MDAIDp
+Up <- as.character(tabp$ID[tabp$t.2sided<=0.05 & tabp$FC>=0.5])
+Up
+Do <- as.character(tabp$ID[tabp$t.2sided<=0.05 & tabp$FC<=-0.5])
+Do
+Sign <- c(Up,Do)
+tabSign <- tabp[tabp$ID%in%Sign,]
+
+# List of proteins where spectra have to be checked for more stringent data analysis:
+sort(as.character(unique(tabp$Uniprot[(tabp$FC<=-0.5) | (tabp$FC>=0.5)])))
+```
+
+```{r MDAPlot, dependson="MDApsite", echo=FALSE, fig.align='center', dependson="Functions", fig.height=9, fig.width=9}
+tab1 <- tab[tab$ID%in%unique(tabSign$ID),]
+v <- tabSign$FC[match(tab1$ID, tabSign$ID)]
+tab1 <- data.frame(tab1, "FC"=v)
+tab1 <- tab1[order(tab1$FC),]
+tab1$ID <- factor(as.character(tab1$ID), ordered(as.character(tab1$ID[!duplicated(tab1$ID)])))
+v1 <- c(rep("b", nrow(tabp)))
+v1[((tabp$FC<=-0.5)&(tabp$t.2sided<=0.05))|((tabp$FC>=0.5)&(tabp$t.2sided<=0.05))] <- "r"
+tabp1 <- data.frame(tabp, "col"=v1, as.is=T)
+
+VP <- ggplot(data=tabp1, aes(x=FC, y=-log10(t.2sided), label=ID)) + geom_point(data=tabp1[tabp1$col=="b",], alpha=0.6) + geom_point(data=tabp1[tabp1$col=="r",], col="red") + theme_bw() + labs(title="Quantified phosphosite in the MDA-MB-231", y="p-value (-Log10)", x="Fold Change (log2)") + geom_hline(yintercept=0,) + geom_vline(xintercept=0) # + geom_text(data=tabp1[tabp1$col=="r",], position="jitter", col="red")
+VP
+```
+
+Red points are the peptide spectral matches considered as significantly regulated in the analysis.
+
+```{r MDAPlot2, dependson="MDApsite", echo=F, fig.align='center', fig.height=7, fig.width=9}
+BP <- ggplot(data=tab1, aes(x=factor(ID), y=normalisedratioHM)) + geom_hline(yintercept=0,) + geom_hline(yintercept=-1,linetype="dashed",col="grey") + geom_hline(yintercept=1,linetype="dashed",col="grey")  + geom_boxplot(fill="white") 
+BP + geom_point(aes(factor(ID),normalisedratioHM, colour=Fraction),shape = 20,size = 2) + theme_bw()  + theme(axis.text.x=element_text(angle=-90), axis.title.x=element_blank()) + labs(title="Regulated phosphosite in the MDA-MB-231", y="Fold Change (Log2)")  + scale_colour_manual(values = c("membrane"="springgreen4", "cytoplasm"="darkorange2"))
+```
+
+This box plot shows raw quantification results before any manual check of the spectra. 
+
+### 2nd round of analysis performed after manual check of the spectra
+
+Spectra belonging to the proteins with at least one phosphosite quantified in two independent experiments and with an average fold change ≤-0.5 or ≥0.5 were manually assessed together
+with spectra corresponding to proteins belonging to pathways of interest. The ones presenting a mixed MS$_2$ spectrum (leading to wrong identification of the phosphosite) or a poor quality XIC (leading to wrong quantification value) are discarded. `MDAsignspF.csv` and `MDAsignspFLMNA.csv` are the two tables containing manually assessed spectra qualities. There untitled first column contains a field containing the values `g` for "good". `f`, `a` and `m` are discarded (poor fragmentation, low quality xic and mixed spectrum, respectively).  
+After having kept only the "good quality" data corresponding to the proteins of interest, a second round of statistical analysis is performed in order to discard the phosphosites previously significantly regulated that were wrongly identified or quantified in the analysis. The statistical analysis are performed as previously.
+
+```{r MDAstatcheck, dependson="MDApsites", echo=F}
+tabc1 <- read.csv('Tables/MDAsignV5spF.csv', as.is=T)
+tabc1 <- tabc1[tabc1$X=='g',]
+tabc2 <- read.csv('Tables/MDAsignV5spFLMNA.csv', as.is=T)
+tabc2 <- tabc2[tabc2$X=='g',]
+goodsp <- c(tabc1$UniqueID, tabc2$UniqueID)
+tab2 <- tab1[tab1$UniqueID%in%goodsp,] # table with only the selected spectra
+# Perform the two-sided t-test on tab2:
+dat <- lapply(unique(tab2$ID), function(y) tab2[tab2$ID==y, 'normalisedratioHM'])
+dat2 <- lapply(unique(tab2$ID), function(y) tab2[tab2$ID==y, 'Experiment'])
+names(dat) <- unique(tab2$ID)
+
+dat <- lapply(1:length(dat), function(x) aggregate(dat[[x]], list(dat2[[x]]), median)[,2]) # Keep the median of log2(H/M) per biological replicate in order to perform the t-test.
+names(dat) <- unique(tab2$ID)
+
+s <- lapply(dat, length)
+dat <- dat[s>=2] # Select only the phosphosites quantified in at least two independent experiments.
+p5 <- sapply(1:length(dat), function(y) t.test(dat[[y]], alternative='two.sided')$p.value)
+fc <- sapply(1:length(dat), function(y) mean(dat[[y]]))
+Uniprot <- tab2$Uniprot[match(names(dat), tab2$ID)]
+tabp <- FilledTable(dat, data.frame(ID=names(dat), Uniprot=Uniprot, t.2sided=p5, FC=fc)) # Table with for each ID the pvalue of the two-sided t-test, the fold change and the log2(H/M) (median per experiment).
+
+# List of significant p.value (t.test) + FC above 0.5 or under -0.5:
+
+MDAIDp <- as.character(unique(tabp$ID[tabp$t.2sided<=0.05]))
+MDAIDp
+Up <- as.character(tabp$ID[tabp$t.2sided<=0.05 & tabp$FC>=0.5])
+Up
+Do <- as.character(tabp$ID[tabp$t.2sided<=0.05 & tabp$FC<=-0.5])
+Do
+Sign <- c(Up,Do)
+tabSign <- tabp[tabp$ID%in%Sign,]
+```
+
+```{r MDAPlot3, dependson="MDAstatcheck", echo=FALSE, fig.align='center', dependson="Functions", fig.height=7, fig.width=9}
+tab2 <- tab2[tab2$ID%in%unique(tabSign$ID),]
+v <- tabSign$FC[match(tab2$ID, tabSign$ID)]
+tab2 <- data.frame(tab2, "FC"=v)
+tab2 <- tab2[order(tab2$FC),]
+tab2$ID <- factor(as.character(tab2$ID), ordered(as.character(tab2$ID[!duplicated(tab2$ID)])))
+
+BP <- ggplot(data=tab2, aes(x=factor(ID), y=normalisedratioHM)) + geom_hline(yintercept=-1,linetype="dashed",col="grey") + geom_hline(yintercept=1,linetype="dashed",col="grey")  + geom_boxplot(fill="white")
+BP + geom_point(aes(factor(ID),normalisedratioHM, colour=Fraction),shape = 20,size = 2) + theme_bw()  + theme(axis.text.x=element_text(angle=-90), axis.title.x=element_blank())+ labs(title="Regulated phosphosite in the MDA-MB-231 (after manual check)", y="Fold Change (Log2)") + geom_hline(yintercept=0,) + scale_colour_manual(values = c("membrane"="springgreen4", "cytoplasm"="darkorange2"))
+```
+
+These phosphosites are considered "high confidence" regulated phosphosites in the MDA upon interaction with HUVEC.
+
+---------------------------------------------------
+## Regulated phosphosites in the endothelial cells
+
+### Description
+
+The data analysis process is exactly the same as what has been done with phosphopeptides identified in the MDA-MB-231.
+
+```{r HUVECnumbers, dependson="numbers1", echo=FALSE}
+lHUVECt <- nrow(tHUV)
+lUIDHUVEC <- length(unique(tHUV$ID))
+lUIDHUVECq <- length(unique(tHUV$ID[!is.na(tHUV$log2HM)])) / length(unique(tHUV$ID)) * 100
+lUIDHUVECm <- length(unique(tHUV$ID[tHUV$Fraction=="membrane"]))
+lUIDHUVECc <- length(unique(tHUV$ID[tHUV$Fraction=="cytoplasm"]))
+lUIDHUVECmc <- length(intersect(unique(tHUV$ID[tHUV$Fraction=="membrane"]), unique(tHUV$ID[tHUV$Fraction=="cytoplasm"])))
+lUIDHUVECmq <- length(unique(tHUV$ID[(tHUV$Fraction=="membrane") & (!is.na(tHUV$log2HM))]))
+lUIDHUVECcq <- length(unique(tHUV$ID[(tHUV$Fraction=="cytoplasm") & (!is.na(tHUV$log2HM))]))
+lUIDHUVECmcq <- length(intersect(unique(tHUV$ID[(tHUV$Fraction=="membrane") & (!is.na(tHUV$log2HM))]), unique(tHUV$ID[(tHUV$Fraction=="cytoplasm") & (!is.na(tHUV$log2HM))])))
+```
+
+There are `r lHUVECt` identified phospho-peptides in the HUVEC. They correspond to `r lUIDHUVEC` unique ID, among which `r lUIDHUVECq`% are quantified. `r lUIDHUVECc` come from cytoplasmic fractions (`r lUIDHUVECcq` quantified), `r lUIDHUVECm` from membrane-enriched fractions (`r lUIDHUVECmq` quantified), and `r lUIDHUVECmc` are common in both (`r lUIDHUVECmcq` quantified).
+
+### Statistical analysis
+
+```{r HUVECpsites, dependson="HUVECnumbers", dependson="Functions", cache.lazy=FALSE, echo=FALSE}
+tab <- tHUV
+tab <- tab[!is.na(tab$log2HM),]
+IDQuan <- paste0(tab$QuanResultID,"-",tab$SpectrumFile) # creates a unique quantification ID per phosphosite. 
+tab <- data.frame(tab,IDQuan=IDQuan,stringsAsFactors=F)
+
+QID <- lapply(unique(tab$IDQuan), function(y) tab[tab$IDQuan==y, 'X3']) 
+names(QID) <- unique(tab$IDQuan) # list with the pRS probability of the first phosphosite for each QuanResultID
+SID <- lapply(unique(tab$IDQuan), function(y) tab[tab$IDQuan==y, 'SpectrumFile']) 
+names(SID) <- unique(tab$IDQuan) # list with the sample files for each QuanResultID
+UID <- lapply(unique(tab$IDQuan), function(y) tab[tab$IDQuan==y, 'UniqueID']) 
+names(UID) <- unique(tab$IDQuan) # list with the unique row ID for each QuanResultID
+
+
+MaxpRS <- lapply(1:length(QID), function(x) aggregate(as.numeric(as.character(QID[[x]])), list(as.character(SID[[x]])), max)[,2]) 
+names(MaxpRS) <- unique(tab$IDQuan) # determines which quantification result corresponds to the highest pRS probability for a phosphosite in a given sample.
+
+v <- c(rep(0,length(MaxpRS)))
+for (i in 1:length(MaxpRS)) {
+  for (j in 1:length(UID[[i]])) {
+    if (MaxpRS[[i]]==as.numeric(as.character(QID[[i]][j]))) {
+      v[i] <- as.character(UID[[i]][j])
+    }
+  }
+}
+
+tab1 <- tab[tab$UniqueID%in%v,] ## This table contain one quan per peptide + the peptide of this quanvalue with the max pRS
+
+#### Then, I perform a t-test on the phosphosites 
+
+dat <- lapply(unique(tab1$ID), function(y) tab1[tab1$ID==y, 'normalisedratioHM'])
+dat2 <- lapply(unique(tab1$ID), function(y) tab1[tab1$ID==y, 'Experiment'])
+names(dat) <- unique(tab1$ID)
+
+dat <- lapply(1:length(dat), function(x) aggregate(dat[[x]], list(dat2[[x]]), median)[,2]) # Keep the median of log2(H/M) per biological replicate in order to perform the t-test.
+names(dat) <- unique(tab1$ID)
+
+s <- lapply(dat, length)
+dat <- dat[s>=2] # Select only the phosphosites quantified in at least two independent experiments.
+p5 <- sapply(1:length(dat), function(y) t.test(dat[[y]], alternative='two.sided')$p.value)
+fc <- sapply(1:length(dat), function(y) mean(dat[[y]]))
+Uniprot <- tab1$Uniprot[match(names(dat), tab1$ID)]
+tabp <- FilledTable(dat, data.frame(ID=names(dat), Uniprot=Uniprot, t.2sided=p5, FC=fc)) # Table with for each ID the pvalue of the two-sided t-test, the fold change and the log2(H/M) (median per experiment).
+# write.csv(tabp, "MDAttest.csv", row.names=F) # saved for enrichment analysis
+
+# List of significant p.value (t.test) + FC above 0.5 or under -0.5:
+
+HUVECIDp <- as.character(unique(tabp$ID[tabp$t.2sided<=0.05]))
+HUVECIDp
+Up <- as.character(tabp$ID[tabp$t.2sided<=0.05 & tabp$FC>=0.5])
+Up
+Do <- as.character(tabp$ID[tabp$t.2sided<=0.05 & tabp$FC<=-0.5])
+Do
+Sign <- c(Up,Do)
+tabSign <- tabp[tabp$ID%in%Sign,]
+
+# List of proteins where spectra have to be checked for more stringent data analysis:
+sort(as.character(unique(tabp$Uniprot[(tabp$FC<=-0.5) | (tabp$FC>=0.5)])))
+```
+
+```{r HUVECPlot, dependson="HUVECpsite", echo=FALSE, fig.align='center', dependson="Functions", fig.height=9, fig.width=9}
+tab1 <- tab[tab$ID%in%unique(tabSign$ID),]
+v <- tabSign$FC[match(tab1$ID, tabSign$ID)]
+tab1 <- data.frame(tab1, "FC"=v)
+tab1 <- tab1[order(tab1$FC),]
+tab1$ID <- factor(as.character(tab1$ID), ordered(as.character(tab1$ID[!duplicated(tab1$ID)])))
+v1 <- c(rep("b", nrow(tabp)))
+v1[((tabp$FC<=-0.5)&(tabp$t.2sided<=0.05))|((tabp$FC>=0.5)&(tabp$t.2sided<=0.05))] <- "r"
+tabp1 <- data.frame(tabp, "col"=v1, as.is=T)
+
+VP <- ggplot(data=tabp1, aes(x=FC, y=-log10(t.2sided), label=ID)) + geom_point(data=tabp1[tabp1$col=="b",], alpha=0.6) + geom_point(data=tabp1[tabp1$col=="r",], col="red") + theme_bw() + labs(title="Quantified phosphosite in the HUVEC", y="p-value (-Log10)", x="Fold Change (log2)") + geom_hline(yintercept=0,) + geom_vline(xintercept=0) # + geom_text(data=tabp1[tabp1$col=="r",], position="jitter", col="red")
+VP
+```
+
+```{r HUVECPlot2, dependson="HUVECpsite", echo=FALSE, fig.align='center', fig.height=7, fig.width=9}
+BP <- ggplot(data=tab1, aes(x=factor(ID), y=normalisedratioHM)) + geom_hline(yintercept=0,) + geom_hline(yintercept=-1,linetype="dashed",col="grey") + geom_hline(yintercept=1,linetype="dashed",col="grey")  + geom_boxplot(fill="white") 
+BP + geom_point(aes(factor(ID),normalisedratioHM, colour=Fraction),shape = 20,size = 2) + theme_bw()  + theme(axis.text.x=element_text(angle=-90), axis.title.x=element_blank()) + labs(title="Regulated phosphosite in the HUVEC", y="Fold Change (Log2)")  + scale_colour_manual(values = c("membrane"="springgreen4", "cytoplasm"="darkorange2"))
+```
+
+### 2nd round of analysis performed after manual check of the spectra
+
+All the spectra belonging to the proteins with at least one phosphosite quantified in two independent experiments and with an average fold change ≤-0.5 or ≥0.5 were manually assessed. The ones presenting a mixed MS2 spectrum (leading to wrong identification of the phosphosite) or a XIC leading to wrong quantification value are discarded. `HUVsignspF.csv` contains manually assessed spectra qualities. 
+
+```{r HUVECstatcheck, dependson="HUVECpsites", echo=F}
+tabc1 <- read.csv('Tables/HUVsignV5spF.csv', as.is=T)
+tabc1 <- tabc1[tabc1$X=='g',]
+goodsp <- c(tabc1$UniqueID)
+tab2 <- tab1[tab1$UniqueID%in%goodsp,] # table with only the selected spectra
+# Perform the two-sided t-test on tab2:
+dat <- lapply(unique(tab2$ID), function(y) tab2[tab2$ID==y, 'normalisedratioHM'])
+dat2 <- lapply(unique(tab2$ID), function(y) tab2[tab2$ID==y, 'Experiment'])
+names(dat) <- unique(tab2$ID)
+
+dat <- lapply(1:length(dat), function(x) aggregate(dat[[x]], list(dat2[[x]]), median)[,2]) # Keep the median of log2(H/M) per biological replicate in order to perform the t-test.
+names(dat) <- unique(tab2$ID)
+
+s <- lapply(dat, length)
+dat <- dat[s>=2] # Select only the phosphosites quantified in at least two independent experiments.
+p5 <- sapply(1:length(dat), function(y) t.test(dat[[y]], alternative='two.sided')$p.value)
+fc <- sapply(1:length(dat), function(y) mean(dat[[y]]))
+Uniprot <- tab2$Uniprot[match(names(dat), tab2$ID)]
+tabp <- FilledTable(dat, data.frame(ID=names(dat), Uniprot=Uniprot, t.2sided=p5, FC=fc)) # Table with for each ID the pvalue of the two-sided t-test, the fold change and the log2(H/M) (median per experiment).
+
+# List of significant p.value (t.test) + FC above 0.5 or under -0.5:
+
+HUVECIDp <- as.character(unique(tabp$ID[tabp$t.2sided<=0.05]))
+HUVECIDp
+Up <- as.character(tabp$ID[tabp$t.2sided<=0.05 & tabp$FC>=0.5])
+Up
+Do <- as.character(tabp$ID[tabp$t.2sided<=0.05 & tabp$FC<=-0.5])
+Do
+Sign <- c(Up,Do)
+tabSign <- tabp[tabp$ID%in%Sign,]
+```
+
+```{r HUVECPlot3, dependson="HUVECstatcheck", echo=FALSE, fig.align='center', dependson="Functions", fig.height=7, fig.width=9}
+tab2 <- tab2[tab2$ID%in%unique(tabSign$ID),]
+v <- tabSign$FC[match(tab2$ID, tabSign$ID)]
+tab2 <- data.frame(tab2, "FC"=v)
+tab2 <- tab2[order(tab2$FC),]
+tab2$ID <- factor(as.character(tab2$ID), ordered(as.character(tab2$ID[!duplicated(tab2$ID)])))
+
+BP <- ggplot(data=tab2, aes(x=factor(ID), y=normalisedratioHM)) + geom_hline(yintercept=-1,linetype="dashed",col="grey") + geom_hline(yintercept=1,linetype="dashed",col="grey")  + geom_boxplot(fill="white")
+BP + geom_point(aes(factor(ID),normalisedratioHM, colour=Fraction),shape = 20,size = 2) + theme_bw()  + theme(axis.text.x=element_text(angle=-90), axis.title.x=element_blank())+ labs(title="Regulated phosphosite in the HUVEC (after manual check)", y="Fold Change (Log2)") + geom_hline(yintercept=0,) + scale_colour_manual(values = c("membrane"="springgreen4", "cytoplasm"="darkorange2"))
+```
