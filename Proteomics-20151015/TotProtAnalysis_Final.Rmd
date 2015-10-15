@@ -1,0 +1,506 @@
+---
+title: "Total Protein analysis in the TEM project"
+author: "Marie Locard-Paulet"
+date: "28/09/2015"
+output: html_document
+---
+
+Raw files are the following:
+
+* experiment labelled "MLP": files `20130211_MLP_363282_gb97A to J` are 10 gel bands of an independent co-culture experiment of MDA-MB-231-LM2 (labelled Heavy) and HUVECs (light), using MDA-MB-231-LM2 (medium) in suspension as control. This experiment has been performed exactly like SILAC010, SILAC011, SILAC12, SILAC013 and SILAC017 (Experiments A to E in the supplementary tables of the paper). The gel bands have been digested (in-gel) and subjected to LC-MSMS on the orbitrap Velos.
+* Off-line HpH RP-HPLC fractions (19 per sample) of peptides from cytoplasmic fractions of the following experiments (done by Kelly McMahon):
+  + "MLP1" = SILAC012/psMLP113 (cytoplasmic fraction of labelled LM2, experiment C in the paper)
+  + "MLP2" = SILAC011/psMLP125 (cytoplasmic fraction of labelled LM2, experiment B in the paper)
+  + "MLP3" = SILAC013/psMLP129 (cytoplasmic fraction of labelled LM2, experiment D in the paper)
+  + "MLP4" = SILAC014 (cytoplasmic fraction of labelled HUVECs, experiment F in the paper)
+  + "MLP5" = SILAC015 (cytoplasmic fraction of labelled HUVECs, experiment G in the paper)
+  + "MLP6" = SILAC016 (cytoplasmic fraction of labelled HUVECs, experiment H in the paper)
+* EPHA2-IP performed by Lindsay Lim (in the folder EPHA2-IP): She did two independent co-culture experiments with LM2 and HUVEC, using medium-labelled LM2 cells as a monoculture sample (exactly like the main phospho-experiment of the paper). Then she lysed in PLC buffer and performed an IP. I have 2 experiment results (CC1 and CC2).
+
+I open the files searched in Proteome Discoverer (all fractions ran together) and analyse all SILAC Heavy and Medium intensities with no intensity threshold first: files names `..._NoQuanThreshold` in the folders `Analysis_2` and `EPHA2-IP`. for each file, I calculate the 5% quantile of Median and Heavy labels intensities combined and use it as a threshold for the quantification. 
+
+Raw files are then reanylised with this threshold in PD1.4 and I export the ungroupped peptide tables, proteins still grouped: files `..._QuanThreshold`.
+
+```{r pakages, include=FALSE}
+require(ggplot2)
+library(gridExtra)
+require(clusterProfiler)
+require(org.Hs.eg.db)
+```
+
+```{r input1}
+quan <- c(list.files(path = "Analysis_2/NoQuanThreshold/", pattern = ".csv"), list.files(path = "EPHA2-IP/NoQuanThreshold/", pattern = ".csv"))
+prot <- c(list.files(path = "Analysis_2/QuanThreshold/", pattern = ".csv"), list.files(path = "EPHA2-IP/QuanThreshold/", pattern = ".csv"))
+```
+
+
+
+```{r functions}
+Create_Files_list <- function(FileNames) {# read ;csv for all file names in the working directory.
+  l <- list()
+  for (f in FileNames) {
+  l[[length(l)+1]] <- read.delim(f, sep = ";", header = T, stringsAsFactors = F)
+  }
+  names(l) <- FileNames
+  l
+}
+Normalisation_peptide_table <- function(table) {
+  table <- table[table$PEP <= 0.01,]
+  table <- table[!grepl("|", table$Protein.Description, fixed = T),]
+  table <- table[!is.na(table$Heavy.Medium),]
+  logHM <- log(table$Heavy.Medium, 2)
+  median <- median(logHM)
+  df <- data.frame(table, "log2HM" = (logHM-rep(median, nrow(table))), stringsAsFactors = F)
+  df
+}
+AddGenes_peptide_table <- function(tab) {
+  vec <- tab$Protein.Group.Accessions
+  vec <- sapply(vec, function(x) strsplit(x, split="|", fixed=T)[[1]][1])
+  vec <- bitr(vec, fromType = "UNIPROT", toType = "SYMBOL", annoDb = "org.Hs.eg.db")
+  genes <- vec[,2][match(tab$Protein.Group.Accessions,vec[,1])]
+  UniprotEntry <- tab$Protein.Description
+  UniprotEntry <- sapply(1:length(UniprotEntry), function(x) strsplit(UniprotEntry[x], "- [", fixed = T)[[1]][2])
+  UniprotEntry <- sapply(1:length(UniprotEntry), function(x) strsplit(UniprotEntry[x], "_", fixed = T)[[1]][1])
+  tab <- data.frame(tab, "Symbol"=genes, "UniprotEntry" = UniprotEntry, stringsAsFactors = F)
+  tab
+}
+```
+
+# Protein quantification
+
+## Defining threshold for quantification
+
+I cannot choose different thresholds for the 2 channels in PD so I decide on the 5% quantile of the combined intensities: Median and Heavy. Here are presented the different thresholds in the different files (red line on the intensity distributions).
+
+Primary filter: PEP below or equal to 0.01.
+
+```{r QuantificationThreshold}
+FileNames <- vector(length = length(quan))
+FileNames[!grepl("_LL", quan)] <- sapply(quan[!grepl("_LL", quan)], function(x) paste0("Analysis_2/NoQuanThreshold/", x))
+FileNames[grepl("_LL", quan)] <- sapply(quan[grepl("_LL", quan)], function(x) paste0("EPHA2-IP/NoQuanThreshold/", x))
+l <- Create_Files_list(FileNames)
+
+normfactors <- vector(length = length(l))
+for (i in 1:length(l)) {
+  tab <- l[[i]]
+  threshold <- quantile(c(tab$Heavy, tab$Medium), 0.05, na.rm = T)
+  par(mfrow=c(1,2))
+  hist(log(c(tab$Heavy)), breaks = 100, main = strsplit(names(l)[i], "_")[[1]][3])
+  abline(v = log(threshold), col = "red")
+  hist(log(c(tab$Medium)), breaks = 100, main =strsplit(names(l)[i], "_")[[1]][3])
+  abline(v = log(threshold), col = "red")
+  normfactors[i] <- threshold
+  names(normfactors)[i] <- strsplit(names(l)[i], "_")[[1]][3]
+}
+```
+
+
+Graphs labelled `r names(normfactors)[10]` are the input of the IP. These will be used for normalisation of the mix in the IP samples.
+
+Thresholds for `r names(normfactors)` are the following: `r normfactors`, respectively. I use these values as a threshold for calculating the SILAC heavy/Medium ratio (H/M) for each peptide.
+
+
+## Protein quantification with higher intensity peptides
+
+For each protein, I calculate the mean of the log2(H/M) ratios of the 3 most intense peptides. The IP values are systematically normalised by the input SILAC ratios.
+
+```{r ProtQuan}
+FileNames <- vector(length = length(prot))
+FileNames[!grepl("_LL", prot)] <- sapply(prot[!grepl("_LL", prot)], function(x) paste0("Analysis_2/QuanThreshold/", x))
+FileNames[grepl("_LL", prot)] <- sapply(prot[grepl("_LL", prot)], function(x) paste0("EPHA2-IP/QuanThreshold/", x))
+l <- Create_Files_list(FileNames)
+
+l2 <- list()
+for (i in 1:7) {
+  l2[[length(l2)+1]] <- Normalisation_peptide_table(l[[i]])
+}
+for (i in 8:11) {
+  table <- l[[i]]
+  table <- table[table$PEP <= 0.01,]
+  table <- table[!grepl("|", table$Protein.Description, fixed = T),]
+  table <- table[!is.na(table$Heavy.Medium),]
+  logHM <- log(table$Heavy.Medium, 2)
+  df <- data.frame(table, "log2HM" = logHM, stringsAsFactors = F)
+  l2[[length(l2)+1]] <- df
+}
+
+
+med1 <- median(l2[[10]]$log2HM, na.rm = T)
+med2 <- median(l2[[11]]$log2HM, na.rm = T)
+
+l2[[8]]$log2HM <- l2[[8]]$log2HM-med1
+l2[[9]]$log2HM <- l2[[9]]$log2HM-med2
+
+names(l2) <- names(l)
+l <- list(l2[[1]], l2[[2]], l2[[3]], l2[[4]], l2[[5]], l2[[6]],l2[[7]], l2[[8]], l2[[9]])
+names(l) <- names(l2)[1:9]
+
+Values <- list()
+protTab <- list()
+for (i in 1:length(l)) {
+  tab <- l[[i]]
+  #tab <- Normalisation_peptide_table(tab)
+  tab <- tab[order(tab$Sequence),]
+  tab <- tab[!duplicated(tab$Sequence),]
+  proteins <- unique(tab$Protein.Descriptions)
+  output1 <- matrix(ncol = ncol(tab), nrow = 1)
+  dimnames(output1)[[2]] <- names(tab)
+  mean <- list()
+  sd <- list()
+  for (el in proteins) {
+    sub <- subset(tab[tab$Protein.Descriptions==el,])
+    sub <- sub[!duplicated(sub$QuanResultID),]
+    sumInt <- sub$Heavy + sub$Medium
+    sub <- sub[order(sumInt, decreasing = T),]
+    sub <- sub[1:3,]
+    output1 <- rbind(output1, sub)
+    mean[[length(mean)+1]] <- mean(sub$log2HM, na.rm = T)
+    sd[[length(sd)+1]] <- sd(sub$log2HM, na.rm = T)
+  }
+  mean <- unlist(mean)
+  sd <- unlist(sd)
+  protTab[[length(protTab)+1]] <- data.frame("Protein.Description"=proteins, "Mean" = mean, "StandardDev" = sd)
+  names(protTab)[length(protTab)] <- names(l)[i]
+  Values[[length(Values)+1]] <- output1
+  names(Values)[length(Values)] <-  names(l)[i]
+  
+  #plot(-log10(protTab[[length(protTab)]]$StandardDev)~protTab[[length(protTab)]]$Mean)
+}
+
+protTab2 <- protTab
+Values2 <- Values
+```
+
+```{r Proteins, echo=FALSE}
+HUVprot <- c("AHNAK", "EPHA2", "MK14", "STMN1", "MK03", "RHG01", "SUN2", "PEA15", "PTRF", "NOS3", "ZYX", "HSPB1", "ITPR3", "FLNA", "CTNB1", "MK01", "MENTO", "P4K2A", "MELT", "NEST", "CTND1", "PKN2", "CI142", "ACVL1", "BNIP2", "TPD54", "AMPD2", "NIBL1", "K1C18", "PDLI4", "MAP4", "ITB4", "CLCN7")
+LM2prot <- c("TLN1", "LMNA", "TPD52", "EGFR", "F125A", "STIM1", "FMNL", "ARAP3", "PTRF", "ARHG2", "CLIP1", "CLIP2", "RL28", "STMN1", "FLNA", "H4", "AHNAK", "KI67", "DHCR7", "GTR1", "CD97", "ITPR3", "IQGA1", "PAR2", "FUND2", "H14", "LIPB1", "RAF1", "CYTSB", "TPD54", "PECA1", "NUCL", "KPCA", "NPM", "RAF1", "RHG35", "HUWE1", "KTN1", "PALLD", "RBM7", "MPRIP", "SSFA2", "AFAP1", "PAXI", "CD44", "SRS11", "HSPB1", "BOK", "LIMD2", "PAK2", "SVIL", "ANLN", "EPHA2", "MK01", "PININ", "VIME", "PEA15", "STK10", "ITB4", "AKAP2", "MYPT1")
+```
+
+# MDA-MB-231-LM2
+
+Firstly, I work with the tables of LM2 samples.
+
+I am looking for the following proteins of interest (presented in the figure 2 of the paper - these proteins have regulated phosphosites with 0.5 <= log2(H/M) <= -0.5):
+`r LM2prot`.
+
+I keep only the peptides with a PEP <= 0.01.
+
+## Protein quantification
+
+I calculate the log2(H/M) ratios per peptides and I normalise to the median of the log2(H/M) ratios of the entire sample.
+
+```{r}
+intNames <- FileNames[grepl("_MLP1_", FileNames) | grepl("_MLP2_", FileNames) | grepl("_MLP3_", FileNames) | grepl("_MLP_", FileNames) | grepl("CoCulture", FileNames)] # Select files of labelled LM2
+
+protTab <- list()
+for (i in 1:length(protTab2)) {
+  if (names(protTab2)[i] %in% intNames) { protTab[[length(protTab)+1]] <- protTab2[[i]] }
+}
+names(protTab) <- names(protTab2)[names(protTab2) %in% intNames]
+
+```
+
+## Median for all experiments
+
+I calculate the median of log2(H/M) ratio per protein and the standard deviation. All the obtained values are plotted in the following boxplot.The distribution of the log2(H/M) per protein are presented in a volcano plot (y is the -log10(%CV)) and the corresponding density on the top.
+
+```{r}
+tab <- protTab[[1]]
+names(tab) <- c(names(tab)[1], sapply(names(tab)[2:length(names(tab))], function(x) paste0(x, "_", strsplit(names(protTab)[1], "_")[[1]][3])))
+for(i in 2:length(protTab)) {
+  tab <- merge(tab, protTab[[i]], by = "Protein.Description", all = T)
+  names(tab)[(length(names(tab))-1):length(names(tab))] <- sapply(c("Mean", "StandardDev"), function(x) paste0(x, "_", strsplit(names(protTab)[i], "_")[[1]][3]))
+}
+
+med <- sapply(1:nrow(tab), function(x) median(as.numeric(tab[x,grepl("Mean_", names(tab))]), na.rm =T))
+sd <- sapply(1:nrow(tab), function(x) sd(tab[x,grepl("Mean_", names(tab))], na.rm = T))
+n <- sapply(1:nrow(tab), function(x) length(tab[x,grepl("Mean_", names(tab))][!is.na(tab[x,grepl("Mean_", names(tab))])]))
+names(med) <- tab$Protein.Description
+names(sd) <- tab$Protein.Description
+names(n) <- tab$Protein.Description
+perc <- length(med[med>=0.5 | med <= -0.5])/length(med)*100
+
+means3 <- med[n>=3]
+sd3 <- sd[n>=3]
+
+perc3 <- length(means3[means3>=0.5 | means3 <= -0.5])/length(means3)*100
+
+Symbol <- sapply(as.character(tab$Protein.Description), function(x) strsplit(x, "GN=")[[1]][2])
+Symbol <- sapply(Symbol, function(x) strsplit(x, " ")[[1]][1])
+element <- tab[Symbol %in% LM2prot,]
+export <- element
+write.csv(element, "OutputTab/MedianMDAs.csv", row.names = F)
+nr <- nrow(element)
+element <- data.frame("Symbol"=rep(Symbol[Symbol %in% LM2prot], 6), "Median" = c(element[,2], element[,4], element[,6], element[,8], element[,10], element[,12]), "Exp" = rep(c("MLP", "MLP1", "MLP2", "MLP3", "IP1", "IP2"), each = nr))
+
+gg <- ggplot(element, aes(x = Symbol, y = Median)) + geom_rect(xmax = nrow(element), xmin = 0, ymax = 2.5, ymin = 0.5, fill = "gray90") + geom_rect(xmax = nrow(element), xmin = 0, ymax = -0.5, ymin = -2.5, fill = "gray90") + geom_boxplot(col = "grey") + theme_classic()  + geom_hline(yintercept = 0)
+print(gg + geom_point() + ylab("log2(H/M) per sample") + xlab("Protein from the LM2") + ggtitle("log2(H/M) of the 23 \n proteins of interest in the LM2") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ylim(-2.5,2.5))
+
+tab1 <- tab[n >=3,]
+pval <- sapply(1:nrow(tab1), function(x) t.test(tab1[x,c(2, 4, 6, 8, 10, 12)], alternative = "two.sided")$p.value)
+mean2 <- med[n>=3]
+col <- rep("not regulated", nrow(tab1))
+col[pval<=0.05 & (mean2 >= 0.5 | mean2 <= -0.5)] <- "regulated"
+df <- data.frame(tab1, "pval" = pval, "FC" = mean2, "col" = col)
+
+sd <- sapply(1:nrow(df), function(x) sd(df[x,c(2,4,6,8, 10, 12)], na.rm = T))
+cv <- sd/abs(df$FC)
+df <- data.frame(df, "sdev" = sd, "cv" = cv)
+df <- df[df$cv<80,]
+
+p <- length(unique(as.character(df$Protein.Description)))
+ppos <- length(unique(as.character(df$Protein.Description[df$FC>=0.5])))
+pneg <- length(unique(as.character(df$Protein.Description[df$FC<=-0.5])))
+
+scatter <- ggplot(df, aes(x = FC, y = -log10(cv))) + geom_point(alpha = 0.7, fill = "black") + theme_classic() + geom_vline(xintercept = c(-0.5, 0.5)) + annotate("text", x = -1, y = -1, label = paste0(round(pneg/p*100,1), "%")) + annotate("text", x = 1, y = -1, label = paste0(round(ppos/p*100,1), "%")) + ggtitle(paste0(p, " proteins quantified")) + xlim(-2,2) + xlab("log2(H/M) fold change")
+
+plot_top <- ggplot(df, aes(x = FC)) + geom_density(alpha = 0.5, fill = "black") + theme(legend.position = "none") + theme_classic() + geom_vline(xintercept = c(-0.5, 0.5)) + theme(axis.title.x = element_blank()) + ggtitle("Log2(H/M) distribution in the LM2") + xlim(-2,2)
+
+print(grid.arrange(plot_top, scatter, ncol=1, nrow=2, heights=c(1.5, 4)))
+```
+ 
+Among the `r p` proteins quantified across a minimum of 3 independent experiments, `r (pneg/p*100 + ppos/p*100)`% are regulated based on a threshold of -0.5 >= log2H/M >=0.5 (with a CV < 80%).
+
+# HUVEC
+
+I am looking for the following proteins of interest:
+`r HUVprot`.
+These are the uniprot entry names. Tey are all the proteins in the Figure 2 of the paper: all regulated proteins with fold change threshold, no stat.
+
+I keep only the peptides with a PEP <= 0.01.
+
+## Protein quantification
+
+Exactly like performed on the LM2.
+
+```{r, echo=FALSE}
+intNames <- FileNames[grepl("_MLP4_", FileNames) | grepl("_MLP5_", FileNames) | grepl("_MLP6_", FileNames)]
+protTab <- list()
+for (i in 1:length(protTab2)) {
+  if (names(protTab2)[i] %in% intNames) { protTab[[length(protTab)+1]] <- protTab2[[i]] }
+}
+names(protTab) <- names(protTab2)[names(protTab2) %in% intNames]
+
+```
+
+## Median for all experiments
+
+```{r}
+tab <- protTab[[1]]
+names(tab) <- c(names(tab)[1], sapply(names(tab)[2:length(names(tab))], function(x) paste0(x, "_", strsplit(names(protTab)[1], "_")[[1]][3])))
+for(i in 2:length(protTab)) {
+  tab <- merge(tab, protTab[[i]], by = "Protein.Description", all = T)
+  names(tab)[(length(names(tab))-1):length(names(tab))] <- sapply(c("Mean", "StandardDev"), function(x) paste0(x, "_", strsplit(names(protTab)[i], "_")[[1]][3]))
+}
+
+med <-rowMeans(tab[,grepl("Mean_", names(tab))], na.rm =T)
+sd <- sapply(1:nrow(tab), function(x) sd(tab[x,grepl("Mean_", names(tab))], na.rm = T))
+n <- sapply(1:nrow(tab), function(x) length(tab[x,grepl("Mean_", names(tab))][!is.na(tab[x,grepl("Mean_", names(tab))])]))
+names(med) <- tab$Protein.Description
+names(sd) <- tab$Protein.Description
+names(n) <- tab$Protein.Description
+perc <- length(med[med>=0.5 | med <= -0.5])/length(med)*100
+
+means3 <- med[n==3]
+sd3 <- sd[n==3]
+
+perc3 <- length(means3[means3>=0.5 | means3 <= -0.5])/length(means3)*100
+
+Symbol <- sapply(as.character(tab$Protein.Description), function(x) strsplit(x, "GN=")[[1]][2])
+Symbol <- sapply(Symbol, function(x) strsplit(x, " ")[[1]][1])
+element <- tab[Symbol %in% HUVprot,]
+export <- element
+write.csv(element, "OutputTab/MediansHUV.csv", row.names = F)
+nr <- nrow(element)
+element <- data.frame("Symbol"=rep(Symbol[Symbol %in% HUVprot], 3), "Median" = c(element[,2], element[,4], element[,6]), "Exp" = rep(c("MLP4", "MLP5", "MLP6"), each = nr))
+
+gg <- ggplot(element, aes(x = Symbol, y = Median)) + geom_rect(xmax = nrow(element), xmin = 0, ymax = 2, ymin = 0.5, fill = "gray90") + geom_rect(xmax = nrow(element), xmin = 0, ymax = -0.5, ymin = -2, fill = "gray90") + geom_boxplot(col = "grey") + theme_classic()  + geom_hline(yintercept = 0)
+print(gg + geom_point() + ylab("log2(H/M) per sample") + xlab("Protein from the HUVEC") + ggtitle("log2(H/M) of the 10 \n proteins of interest in the HUVEC") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ylim(-1.5, 1.5))
+
+tab1 <- tab[n ==3,]
+pval <- sapply(1:nrow(tab1), function(x) t.test(tab1[x,c(2, 4, 6)], alternative = "two.sided")$p.value)
+mean2 <- med[n==3]
+col <- rep("not regulated", nrow(tab1))
+col[pval<=0.05 & (mean2 >= 0.5 | mean2 <= -0.5)] <- "regulated"
+df <- data.frame(tab1, "pval" = pval, "FC" = mean2, "col" = col)
+
+sd <- sapply(1:nrow(df), function(x) sd(df[x,c(2,4,6,8)], na.rm = T))
+cv <- sd/abs(df$FC)
+df <- data.frame(df, "sdev" = sd, "cv" = cv)
+df <- df[df$cv<80,]
+
+p <- length(unique(as.character(df$Protein.Description)))
+ppos <- length(unique(as.character(df$Protein.Description[df$FC>=0.5])))
+pneg <- length(unique(as.character(df$Protein.Description[df$FC<=-0.5])))
+
+scatter <- ggplot(df, aes(x = FC, y = -log10(cv))) + geom_point(alpha = 0.7, fill = "black") + theme_classic() + geom_vline(xintercept = c(-0.5, 0.5)) + annotate("text", x = -1, y = -1, label = paste0(round(pneg/p*100,1), "%")) + annotate("text", x = 1, y = -1, label = paste0(round(ppos/p*100,1), "%")) + ggtitle(paste0(p, " proteins quantified")) + xlim(-2,2)+ xlab("log2(H/M) fold change")
+
+plot_top <- ggplot(df, aes(x = FC)) + geom_density(alpha = 0.5, fill = "black") + theme(legend.position = "none") + theme_classic() + geom_vline(xintercept = c(-0.5, 0.5)) + theme(axis.title.x = element_blank()) + ggtitle("Log2(H/M) distribution in the HUVECs") + xlim(-2,2)
+
+grid.arrange(plot_top, scatter, ncol=1, nrow=2, heights=c(1.5, 4))
+
+
+```
+Among the `r p` proteins quantified across the 3 independent experiments, `r (pneg/p*100 + ppos/p*100)`% are regulated based on a threshold of -0.5 >= log2H/M >=0.5 (with a CV < 80%).
+
+# Figures for the paper
+## MDAs
+
+```{r}
+tab <- read.csv("OutputTab/MedianMDAs.csv")
+tabsites <- read.csv("TopHitsMDAAverages.csv")
+
+Uniprot <- sapply(as.character(tab$Protein.Description), function(x) strsplit(x, " - [", fixed = T)[[1]][2])
+Uniprot <- sapply(Uniprot, function(x) strsplit(x, "_")[[1]][1])
+tab <- data.frame(tab, "Uniprot" = Uniprot)
+
+tabsites <- tabsites[tabsites$FC >= 0.5 | tabsites$FC <= -0.5,]
+
+tabtot <- merge(tab, tabsites, by = "Uniprot", all = T)
+
+MedianProt <- sapply(1:nrow(tabtot), function(x) median(as.numeric(tabtot[x,c(3, 5, 7, 9, 11, 13)]), na.rm = T))
+tabtot <- data.frame(tabtot, "MedianProt" = MedianProt)
+
+log2HM <- c(tabtot$Mean_MLP, tabtot$Mean_MLP1, tabtot$Mean_MLP2, tabtot$Mean_MLP3, tabtot$Mean_CoCulture, tabtot$Mean_CoCulture.1, tabtot$FC)
+type <- c(rep("Prot", (6*nrow(tabtot))), rep("psite", nrow(tabtot)))
+ID <- rep(tabtot$ID, 7)
+Prot <- rep(tabtot$Uniprot, 7)
+
+df <- data.frame("log2HM" = log2HM, "type" = type, "ID" = ID, "Prot" = Prot)
+df <- df[as.character(df$Prot)!="CLIP1",]
+df$Prot <- factor(as.character(df$Prot), labels = sort(unique(as.character(df$Prot))))
+
+
+subP <- subset(df, as.character(df$type) =="Prot")
+subPhos <- subset(df, as.character(df$type) == "psite")
+vec <- table(subPhos$Prot)
+vec[vec==0] <- 1 
+l <- sapply(vec, function(x) c(1:x))
+col <- unlist(l)
+subPhos <- data.frame(subPhos[order(as.character(subPhos$Prot)),], "col"=as.character(col))
+
+g <- ggplot(df, aes(y = log2HM, x = Prot))
+print(g + geom_rect(ymin = -0.5, ymax = 0.5, fill = "gray90", xmin = 0, xmax = length(unique(df$Prot))+1) + geom_hline(yintercept = 0, col = "gray") + geom_boxplot(data = subP, aes(y = log2HM, x = Prot)) + geom_point(data = subPhos[subPhos$log2HM>=0.5,], col = "red", size = 5, shape = "+") + geom_point(data = subPhos[subPhos$log2HM <= -0.5,], col = "blue", size = 5, shape = "+") + theme_bw()  + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ggtitle("Boxplot of protein quantities per biological replicate \n mean of phosphosite regulations"))
+
+###################################################################
+
+tabtot$ID <- factor(as.character(tabtot$ID), levels = as.character(tabtot$ID[order(tabtot$FC)]))
+
+log2HM <- c(tabtot$MedianProt, tabtot$FC)
+type <- rep(c("Prot", "psite"), each = nrow(tabtot))
+ID <- rep(tabtot$ID, 2)
+Prot <- rep(tabtot$Uniprot, 2)
+sign <- c("TPD52-S176", "EGFR-S1166", "F125A-S170", "STMN1-S16", "PTRF-S300", "RL28-S115", "AHNK-S5830", "CD97-S831", "IQGA1-S1443", "PTRF-S167", "NUCL-T121", "AHNK-S511", "HUWE1-T1905", "SSFA2-S739", "AFAP1-T663", "SRS11-S207", "ANLN-S485", "LMNA-S22", "EPHA2-Y772", "AKAP2-S748", "AHNK-S3426", "MYPT1-S509")
+sign2 <- rep("No Sign.", length(ID))
+sign2[ID %in% sign] <- "core psites"
+
+df <- data.frame("log2HM" = log2HM, "type" = type, "ID" = ID, "Prot" = Prot, "Sign" = sign2)
+df <- df[as.character(df$Prot)!="CLIP1",]
+df$Prot <- factor(as.character(df$Prot), labels = sort(unique(as.character(df$Prot))))
+
+
+subP <- subset(df, as.character(df$type) =="Prot")
+subPhos <- subset(df, as.character(df$type) == "psite")
+
+g <- ggplot(df, aes(y = log2HM, x = ID))
+
+print(g + geom_rect(ymin = -0.5, ymax = 0.5, fill = "gray90", xmin = 0, xmax = length(unique(df$ID))+1) + geom_bar(data = subPhos, aes(y = log2HM, x = ID, fill = Sign), stat = "identity", width=.5)  + theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6))  + geom_hline(yintercept = 0, col = "gray") + geom_point(data = subP, col = "black", size = 1.5, shape = 21, fill = "khaki1") + scale_fill_manual(values = c("firebrick1", "lightskyblue4")) + ggtitle("Mean log2(HM) per phosphosite \n with protein ratio"))
+```
+
+
+## HUVEC
+
+```{r}
+tab <- read.csv("OutputTab/MediansHUV.csv")
+tabsites <- read.csv("TopHitsHUVECAverages.csv")
+
+Uniprot <- sapply(as.character(tab$Protein.Description), function(x) strsplit(x, " - [", fixed = T)[[1]][2])
+Uniprot <- sapply(Uniprot, function(x) strsplit(x, "_")[[1]][1])
+tab <- data.frame(tab, "Uniprot" = Uniprot)
+
+tabsites <- tabsites[tabsites$FC >= 0.5 | tabsites$FC <= -0.5,]
+
+tabtot <- merge(tab, tabsites, by = "Uniprot", all = T)
+
+MedianProt <- sapply(1:nrow(tabtot), function(x) median(as.numeric(tabtot[x,c(3, 5, 7)]), na.rm = T))
+tabtot <- data.frame(tabtot, "MedianProt" = MedianProt)
+
+log2HM <- c(tabtot$Mean_MLP4, tabtot$Mean_MLP5, tabtot$Mean_MLP6, tabtot$FC)
+type <- c(rep("Prot", (3*nrow(tabtot))), rep("psite", nrow(tabtot)))
+ID <- rep(tabtot$ID, 4)
+Prot <- rep(tabtot$Uniprot, 4)
+
+df <- data.frame("log2HM" = log2HM, "type" = type, "ID" = ID, "Prot" = Prot)
+df <- df[as.character(df$Prot)!="CLIP1",]
+df$Prot <- factor(as.character(df$Prot), labels = sort(unique(as.character(df$Prot))))
+
+
+subP <- subset(df, as.character(df$type) =="Prot")
+subPhos <- subset(df, as.character(df$type) == "psite")
+vec <- table(subPhos$Prot)
+vec[vec==0] <- 1 
+l <- sapply(vec, function(x) c(1:x))
+col <- unlist(l)
+subPhos <- data.frame(subPhos[order(as.character(subPhos$Prot)),], "col"=as.character(col))
+
+g <- ggplot(df, aes(y = log2HM, x = Prot))
+print(g + geom_rect(ymin = -0.5, ymax = 0.5, fill = "gray90", xmin = 0, xmax = length(unique(df$Prot))+1) + geom_hline(yintercept = 0, col = "gray") + geom_boxplot(data = subP, aes(y = log2HM, x = Prot)) + geom_point(data = subPhos[subPhos$log2HM>=0.5,], col = "red", size = 5, shape = "+") + geom_point(data = subPhos[subPhos$log2HM <= -0.5,], col = "blue", size = 5, shape = "+") + theme_bw()  + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ggtitle("Boxplot of protein quantities per biological replicate \n mean of phosphosite regulations"))
+
+###################################################################
+
+tabtot$ID <- factor(as.character(tabtot$ID), levels = as.character(tabtot$ID[order(tabtot$FC)]))
+
+log2HM <- c(tabtot$MedianProt, tabtot$FC)
+type <- rep(c("Prot", "psite"), each = nrow(tabtot))
+ID <- rep(tabtot$ID, 2)
+Prot <- rep(tabtot$Uniprot, 2)
+sign <- c("BNIP2-S114", "AHNK-S5448", "CTNB1-S552", "PEA15-S116", "ITPR3-S2670", "HSPB1-S82", "FLNA-S2152", "PTRF-S167", "SUN2-S12", "STMN1-S25", "AHNK-S135")
+sign2 <- rep("No Sign.", length(ID))
+sign2[ID %in% sign] <- "core psites"
+
+df <- data.frame("log2HM" = log2HM, "type" = type, "ID" = ID, "Prot" = Prot, "Sign" = sign2)
+df <- df[as.character(df$Prot)!="CLIP1",]
+df$Prot <- factor(as.character(df$Prot), labels = sort(unique(as.character(df$Prot))))
+
+
+subP <- subset(df, as.character(df$type) =="Prot")
+subPhos <- subset(df, as.character(df$type) == "psite")
+
+g <- ggplot(df, aes(y = log2HM, x = ID))
+
+print(g + geom_rect(ymin = -0.5, ymax = 0.5, fill = "gray90", xmin = 0, xmax = length(unique(df$ID))+1) + geom_bar(data = subPhos, aes(y = log2HM, x = ID, fill = Sign), stat = "identity", width=.5)  + theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6))  + geom_hline(yintercept = 0, col = "gray") + geom_point(data = subP, col = "black", size = 1.5, shape = 21, fill = "khaki1") + scale_fill_manual(values = c("firebrick1", "lightskyblue4")) + ggtitle("Mean log2(HM) per phosphosite \n with protein ratio"))
+```
+
+# Figure of EPHA2 and its phosphosites ratio
+
+I plot the log2(H/M) per experiment of EPHA2 and its regulated phosphosites on the same graph.
+
+```{r}
+tab <- read.csv("OutputTab/MedianMDAs.csv")
+tabsites <- read.csv("TopHitsMDAAverages.csv")
+
+Uniprot <- sapply(as.character(tab$Protein.Description), function(x) strsplit(x, " - [", fixed = T)[[1]][2])
+Uniprot <- sapply(Uniprot, function(x) strsplit(x, "_")[[1]][1])
+tab <- data.frame(tab, "Uniprot" = Uniprot)
+
+EA2 <- tab[tab$Uniprot=="EPHA2",]
+
+tabsites <- tabsites[tabsites$FC >= 0.5 | tabsites$FC <= -0.5,]
+tabsites <- tabsites[tabsites$Uniprot == "EPHA2",]
+require(reshape)
+tabsites <- melt(tabsites[,c(1:6, 8)])
+
+tab2 <-  melt(EA2[,c(14, 2,4,6,8,10,12)])
+tab2 <- cbind(tab2$Uniprot, tab2)
+names(tab2) <- names(tabsites)
+
+tab3 <- rbind(tab2, tabsites)
+tab3 <- as.data.frame(tab3)
+tab3$value <- as.numeric(as.character(tab3$value))
+
+ggplot(tab3, aes(ID, value)) + geom_rect(ymin = -0.5, ymax = 0.5, xmin = 0, xmax = 4, fill = "grey90") + geom_boxplot() + geom_dotplot(binwidth = 0.04, binaxis='y', stackdir='center', dotsize=1) + scale_color_brewer(palette = "Set1") + theme_bw() + geom_hline(yintercept = 0) + ylab("log2(H/M) per experiment") + xlab("") + ggtitle("Peptides quantified for EPHA2") + ylim(-2, 1)
+```
+
+```{r info}
+sessionInfo()
+```

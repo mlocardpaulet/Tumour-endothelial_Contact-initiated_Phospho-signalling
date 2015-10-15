@@ -40,18 +40,18 @@ cell type, fraction, sample name and raw file name).
 - "SILAC1018TotV5_FAAposition.csv" is the raw table containing all the peptides
 identified in the experiment and the position of the first amino-acid in the 
 protein sequence.
-- “HUVsignV5spF.csv", "MDAsignV5spF.csv" and "MDAsignV5spFLMNA.csv" contain the
-spectra corresponding to the list of regulated targets after manual inspection.  
-- "HUVChecked.csv" and "MDAChecked.csv" are the equivalent tables after manual
-inspection of a broader range of phosphosites of interest.
+- “HUVsignV5spF.csv", "MDAsignV5spF.csv" and "MDAsignV5spFLMNA.csv" contain the spectra corresponding to the list of regulated targets after manual inspection.  
+- "HUVChecked.csv" and "MDAChecked.csv" are the equivalent tables after manual inspection of a broader range of phosphosites of interest.
 - "DA-MDA-HUVEC" is the markdown document associated with the data analysis.
-- “MDARegProt.csv” is the list of uniprot entry names associated to the proteins
-in the “Pathway” figures (manually assessed).
+- “MDARegProt.csv” is the list of uniprot entry names associated to the proteins in the “Pathway” figures (manually assessed).
 - “HUVRegProt.csv” is the equivalent for HUVEC regulated proteins.
 - “TableRegPsites” and related document describe the construction of the
 tables with median of regulation fold per experiment.
-- “DA-MDA-HUVEC.rmd” and associated contain the statistical analysis allowing
-identification of significantly regulates phosphosites (“core”).
+
+In the folder "Proteomics-20151015" are all the documents regarding proteomics analysis:
+MS data from the Proteome Discoverer search are in the folders "Analysis_2" and "EPHA2-IP". 
+More precised description is provided in the "TotProtAnalysis_Final" files. All the 
+tables and figures from the analysis are in the folders "OutputTab" and "OutputFig".
 
 DESCRIPTION:
 
